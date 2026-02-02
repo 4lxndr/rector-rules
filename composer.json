@@ -1,0 +1,38 @@
+{
+    "name": "4lxndr/rector-rules",
+    "description": "Custom Rector rules",
+    "type": "library",
+    "license": "WTFPL",
+    "require": {
+        "php": "^8.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0",
+        "rector/rector": "^2.0",
+        "friendsofphp/php-cs-fixer": "^3.93"
+    },
+    "autoload": {
+        "psr-4": {
+            "Alxndr\\Rector\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Alxndr\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "allow-plugins": {
+            "rector/extension-installer": true
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "cs:check": "php-cs-fixer fix --dry-run --diff",
+        "cs:fix": "php-cs-fixer fix",
+        "phpcs": "@cs:check",
+        "phpcbf": "@cs:fix"
+    }
+}
