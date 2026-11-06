@@ -110,49 +110,78 @@ CODE_SAMPLE
             return null;
         }
 
-        $keys = [];
-        foreach ($node->stmts as $position => $stmt) {
-            $keys[$position] = [...$this->sortKey($stmt, $propertyIndex), $position];
+        $infos = [];
+        foreach ($node->stmts as $stmt) {
+            $infos[\spl_object_id($stmt)] = $this->describe($stmt, $propertyIndex);
         }
 
-        \asort($keys);
-        $positions = \array_keys($keys);
+        $sortedStmts = $node->stmts;
+        \usort($sortedStmts, static fn (Node\Stmt $a, Node\Stmt $b): int => self::compare($infos[\spl_object_id($a)], $infos[\spl_object_id($b)]));
 
-        if ($positions === \array_keys($node->stmts)) {
+        if ($sortedStmts === $node->stmts) {
             return null;
         }
 
-        $node->stmts = \array_map(static fn (int $position): Node\Stmt => $node->stmts[$position], $positions);
+        $node->stmts = $sortedStmts;
 
         return $node;
     }
 
     /**
-     * Non-methods, magic methods, accessors of known properties, accessors of unknown properties, other methods.
-     *
      * @param array<string, int> $propertyIndex
      *
-     * @return array{int, int, int}
+     * @return array{magic: int|null, accessor: bool, index: int|null, type: int}|null null for a non-method
      */
-    private function sortKey(Node\Stmt $stmt, array $propertyIndex): array
+    private function describe(Node\Stmt $stmt, array $propertyIndex): ?array
     {
         if (!$stmt instanceof ClassMethod) {
-            return [0, 0, 0];
+            return null;
         }
 
         $name = $this->getName($stmt);
 
         if (\str_starts_with($name, '__')) {
-            return [1, self::MAGIC_METHOD_ORDER[$name] ?? \PHP_INT_MAX, 0];
+            return ['magic' => self::MAGIC_METHOD_ORDER[$name] ?? 999, 'accessor' => false, 'index' => null, 'type' => 0];
         }
 
-        if (!\preg_match('/^(get|is|has|can|should|set|add|remove)([A-Z].*)$/', $name, $matches)) {
-            return [4, 0, 0];
+        if (!\preg_match('/^(get|set|add|remove|is|has|can|should)([A-Z].*)$/', $name, $matches)) {
+            return ['magic' => null, 'accessor' => false, 'index' => null, 'type' => 0];
         }
 
-        $index = $propertyIndex[\lcfirst($matches[2])] ?? null;
+        return [
+            'magic' => null,
+            'accessor' => true,
+            'index' => $propertyIndex[\lcfirst($matches[2])] ?? null,
+            'type' => self::ACCESSOR_ORDER[$matches[1]],
+        ];
+    }
 
-        return $index === null ? [3, 0, 0] : [2, $index, self::ACCESSOR_ORDER[$matches[1]]];
+    /**
+     * Non-methods first, then magic methods, then accessors in property order, then the rest.
+     * An accessor of an unknown property compares equal to other accessors, as in 1.0.0.
+     *
+     * @param array{magic: int|null, accessor: bool, index: int|null, type: int}|null $a
+     * @param array{magic: int|null, accessor: bool, index: int|null, type: int}|null $b
+     */
+    private static function compare(?array $a, ?array $b): int
+    {
+        if ($a === null || $b === null) {
+            return ($b === null) <=> ($a === null);
+        }
+
+        if ($a['magic'] !== null || $b['magic'] !== null) {
+            return ($a['magic'] ?? \PHP_INT_MAX) <=> ($b['magic'] ?? \PHP_INT_MAX);
+        }
+
+        if (!$a['accessor'] || !$b['accessor']) {
+            return $b['accessor'] <=> $a['accessor'];
+        }
+
+        if ($a['index'] === null || $b['index'] === null) {
+            return 0;
+        }
+
+        return [$a['index'], $a['type']] <=> [$b['index'], $b['type']];
     }
 
     /**
