@@ -14,8 +14,29 @@ use Symplify\RuleDocGenerator\ValueObject\RuleDefinition;
 
 final class SortGettersSettersByPropertyOrderRector extends AbstractRector implements ConfigurableRectorInterface
 {
+    private const ACCESSOR_ORDER = ['get' => 1, 'is' => 1, 'has' => 1, 'can' => 1, 'should' => 1, 'set' => 2, 'add' => 3, 'remove' => 4];
+
+    private const MAGIC_METHOD_ORDER = [
+        '__construct' => 1,
+        '__destruct' => 2,
+        '__toString' => 3,
+        '__invoke' => 4,
+        '__get' => 5,
+        '__set' => 6,
+        '__isset' => 7,
+        '__unset' => 8,
+        '__call' => 9,
+        '__callStatic' => 10,
+        '__clone' => 11,
+        '__sleep' => 12,
+        '__wakeup' => 13,
+        '__serialize' => 14,
+        '__unserialize' => 15,
+        '__debugInfo' => 16,
+    ];
+
     /**
-     * @var callable|null
+     * @var callable(string): bool|null
      */
     private $matchCallback;
 
@@ -74,165 +95,64 @@ CODE_SAMPLE
             return null;
         }
 
-        // Check if a file matches the configured filter
-        if ($this->matchCallback !== null) {
-            $file = $this->file->getFilePath();
-            if (!\call_user_func($this->matchCallback, $file)) {
-                return null;
-            }
+        if ($this->matchCallback !== null && !($this->matchCallback)($this->getFile()->getFilePath())) {
+            return null;
         }
 
-        // Collect the properties in the order of their appearance
-        $properties = [];
+        $propertyIndex = [];
         foreach ($node->getProperties() as $property) {
             foreach ($property->props as $prop) {
-                $properties[] = $this->getName($prop);
+                $propertyIndex[$this->getName($prop)] ??= \count($propertyIndex);
             }
         }
 
-        if ($properties === []) {
+        if ($propertyIndex === []) {
             return null;
         }
 
-        // Clone the stmts array to avoid modifying in place
-        $originalStmts = $node->stmts;
-        $sortedStmts = [...$node->stmts];
+        $keys = [];
+        foreach ($node->stmts as $position => $stmt) {
+            $keys[$position] = [...$this->sortKey($stmt, $propertyIndex), $position];
+        }
 
-        // Sort the methods: magic methods first, then getters/setters/adders/removers by property order, then other methods
-        \usort($sortedStmts, function ($a, $b) use ($properties) {
-            // Non-methods stay in their original position relative to each other
-            if (!$a instanceof ClassMethod && !$b instanceof ClassMethod) {
-                return 0;
-            }
+        \asort($keys);
+        $positions = \array_keys($keys);
 
-            // Methods come after non-methods
-            if (!$a instanceof ClassMethod) {
-                return -1;
-            }
-
-            if (!$b instanceof ClassMethod) {
-                return 1;
-            }
-
-            $aName = $this->getName($a);
-            $bName = $this->getName($b);
-
-            $aIsMagic = $this->isMagicMethod($aName);
-            $bIsMagic = $this->isMagicMethod($bName);
-
-            // Magic methods always come first
-            if ($aIsMagic && !$bIsMagic) {
-                return -1;
-            }
-
-            if (!$aIsMagic && $bIsMagic) {
-                return 1;
-            }
-
-            // Both are magic methods - sort by magic method order
-            if ($aIsMagic && $bIsMagic) {
-                return $this->getMagicMethodOrder($aName) <=> $this->getMagicMethodOrder($bName);
-            }
-
-            $aProperty = $this->extractPropertyFromMethodName($aName);
-            $bProperty = $this->extractPropertyFromMethodName($bName);
-
-            // Only sort getter/setter/adder/remover methods
-            if (!$aProperty && !$bProperty) {
-                return 0;
-            }
-
-            if (!$aProperty) {
-                return 1;
-            }
-
-            if (!$bProperty) {
-                return -1;
-            }
-
-            // Both methods belong to properties
-            if (\in_array($aProperty, $properties, true) && \in_array($bProperty, $properties, true)) {
-                // First sort by property order
-                $aPropertyIndex = \array_search($aProperty, $properties, true);
-                $bPropertyIndex = \array_search($bProperty, $properties, true);
-                $propertyComparison = $aPropertyIndex <=> $bPropertyIndex;
-
-                if ($propertyComparison !== 0) {
-                    return $propertyComparison;
-                }
-
-                // Then sort by method type (get, set, add, remove)
-                $methodOrder = ['get' => 1, 'set' => 2, 'add' => 3, 'remove' => 4];
-                $aType = $this->extractMethodType($aName);
-                $bType = $this->extractMethodType($bName);
-
-                return ($methodOrder[$aType] ?? 5) <=> ($methodOrder[$bType] ?? 5);
-            }
-
-            return 0;
-        });
-
-        // Check if the order actually changed by comparing object IDs
-        $originalIds = \array_map('spl_object_id', $originalStmts);
-        $sortedIds = \array_map('spl_object_id', $sortedStmts);
-
-        if ($originalIds === $sortedIds) {
+        if ($positions === \array_keys($node->stmts)) {
             return null;
         }
 
-        $node->stmts = $sortedStmts;
+        $node->stmts = \array_map(static fn (int $position): Node\Stmt => $node->stmts[$position], $positions);
 
         return $node;
     }
 
-    private function extractPropertyFromMethodName(string $methodName): ?string
+    /**
+     * Non-methods, magic methods, accessors of known properties, accessors of unknown properties, other methods.
+     *
+     * @param array<string, int> $propertyIndex
+     *
+     * @return array{int, int, int}
+     */
+    private function sortKey(Node\Stmt $stmt, array $propertyIndex): array
     {
-        if (\preg_match('/^(get|set|add|remove|is|has|can|should)([A-Z].*)$/', $methodName, $matches)) {
-            return \lcfirst($matches[2]);
+        if (!$stmt instanceof ClassMethod) {
+            return [0, 0, 0];
         }
 
-        return null;
-    }
+        $name = $this->getName($stmt);
 
-    private function extractMethodType(string $methodName): ?string
-    {
-        if (\preg_match('/^(get|set|add|remove|is|has|can|should)/', $methodName, $matches)) {
-            // Treat is/has/can/should as getter variants
-            $type = $matches[1];
-
-            return \in_array($type, ['is', 'has', 'can', 'should'], true) ? 'get' : $type;
+        if (\str_starts_with($name, '__')) {
+            return [1, self::MAGIC_METHOD_ORDER[$name] ?? \PHP_INT_MAX, 0];
         }
 
-        return null;
-    }
+        if (!\preg_match('/^(get|is|has|can|should|set|add|remove)([A-Z].*)$/', $name, $matches)) {
+            return [4, 0, 0];
+        }
 
-    private function isMagicMethod(string $methodName): bool
-    {
-        return \str_starts_with($methodName, '__');
-    }
+        $index = $propertyIndex[\lcfirst($matches[2])] ?? null;
 
-    private function getMagicMethodOrder(string $methodName): int
-    {
-        $magicMethodOrder = [
-            '__construct' => 1,
-            '__destruct' => 2,
-            '__toString' => 3,
-            '__invoke' => 4,
-            '__get' => 5,
-            '__set' => 6,
-            '__isset' => 7,
-            '__unset' => 8,
-            '__call' => 9,
-            '__callStatic' => 10,
-            '__clone' => 11,
-            '__sleep' => 12,
-            '__wakeup' => 13,
-            '__serialize' => 14,
-            '__unserialize' => 15,
-            '__debugInfo' => 16,
-        ];
-
-        return $magicMethodOrder[$methodName] ?? 999;
+        return $index === null ? [3, 0, 0] : [2, $index, self::ACCESSOR_ORDER[$matches[1]]];
     }
 
     /**
